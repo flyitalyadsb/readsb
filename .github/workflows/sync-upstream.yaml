@@ -1,0 +1,33 @@
+name: sync upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Fast-forward dev to wiedehopf/readsb dev
+        run: |
+          git remote add upstream https://github.com/wiedehopf/readsb.git
+          git fetch upstream dev
+          if git merge-base --is-ancestor HEAD upstream/dev; then
+            if [ "$(git rev-parse HEAD)" = "$(git rev-parse upstream/dev)" ]; then
+              echo "Already up to date."
+              exit 0
+            fi
+            git merge --ff-only upstream/dev
+            git push origin dev
+          else
+            echo "::warning::dev has commits not present in upstream/dev — not auto-updating, needs a manual merge"
+            exit 1
+          fi
