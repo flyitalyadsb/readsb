@@ -16,18 +16,31 @@ jobs:
         with:
           ref: dev
           fetch-depth: 0
-      - name: Fast-forward dev to wiedehopf/readsb dev
+      - name: Merge wiedehopf/readsb dev into dev
         run: |
           git remote add upstream https://github.com/wiedehopf/readsb.git
           git fetch upstream dev
-          if git merge-base --is-ancestor HEAD upstream/dev; then
-            if [ "$(git rev-parse HEAD)" = "$(git rev-parse upstream/dev)" ]; then
-              echo "Already up to date."
-              exit 0
-            fi
-            git merge --ff-only upstream/dev
+
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse upstream/dev)" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Real merge, not --ff-only: our dev always carries fork-local patches
+          # (UUID printing, --net-receiver-id build targets, etc.) that diverge
+          # from upstream/dev, so a fast-forward-only merge would refuse every
+          # single day (see git history: this step failed on every scheduled
+          # run since it was added). A normal merge keeps those patches and
+          # folds in upstream's commits on top; it only fails when upstream
+          # touched the same lines our patches touch, which is the case that
+          # actually needs a human.
+          if git merge --no-edit upstream/dev; then
             git push origin dev
           else
-            echo "::warning::dev has commits not present in upstream/dev — not auto-updating, needs a manual merge"
+            git merge --abort
+            echo "::error::Merge conflict with upstream/dev — fork patches overlap upstream changes, needs a manual merge"
             exit 1
           fi
