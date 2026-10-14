@@ -5241,6 +5241,15 @@ static int readClient(struct client *c, int64_t now) {
         }
     }
 
+    // A gap of 800 ms or more since the previous read means the socket went quiet,
+    // so it was drained back then: count it as a flush. Otherwise a client that is
+    // silent for > 2.4 s and then delivers more than one buffer at once (e.g. a feeder
+    // flushing its backlog after a TCP stall) trips the check below on its second
+    // read, with idle CPU, and the rest of that burst is discarded.
+    if (now - c->last_read >= 800) {
+        c->last_read_flush = now;
+    }
+
     if (!Modes.debug_no_discard && !c->discard && now - c->last_read < 800 && now - c->last_read_flush > 2400 && !Modes.synthetic_now) {
         c->discard = 1;
         if (Modes.netIngest && c->proxy_string[0] != '\0') {
