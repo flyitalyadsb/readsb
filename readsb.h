@@ -669,6 +669,7 @@ struct _Modes
     int64_t receiverCount;
     struct net_writer raw_out; // Raw output
     struct net_writer beast_out; // Beast-format output
+    struct net_writer kinetic_out; // Kinetic (SBS-3/BaseStation binary) output
     struct net_writer beast_reduce_out; // Reduced data Beast-format output
     struct net_writer beast_in; // for sending pings to clients sending us beast data
     struct net_writer garbage_out; // Beast-format output
@@ -773,6 +774,7 @@ struct _Modes
     int8_t syntethic_now_suppress_errors;
     int8_t ifile_no_synthetic;
     int8_t sbs_extra_fields; // --devel=sbs_extra_fields: append RSSI (field 23) and aircraft category (field 24) to SBS output
+    int8_t json_age_fields; // --devel=json_age_fields: add various data ages (might add more)
     int8_t tar1090_use_api;
     int8_t verbose;
 
@@ -785,6 +787,7 @@ struct _Modes
     int8_t readProxy;
     int8_t enableClientsJson;
     int8_t forward_mlat; // forward beast mlat messages to beast output ports
+    int8_t forward_mlat_kinetic; // forward mlat messages to the Kinetic output port, independent of forward_mlat (which also affects beast_out)
     int8_t forward_mlat_sbs; // forward mlat messages to sbs output ports
     int8_t beast_forward_noforward;
     int8_t beast_set_noforward_timestamp;
@@ -875,6 +878,9 @@ struct _Modes
     char *net_input_jaero_ports; // jaero SBS input ports
     char *net_input_beast_ports; // List of Beast input TCP ports
     char *net_output_beast_ports; // List of Beast output TCP ports
+    char *net_output_kinetic_ports; // List of Kinetic output TCP ports
+    char *net_kinetic_filter_category; // Kinetic output only: ADS-B emitter categories to filter out, e.g. "C0-C7,A1"
+    char *net_kinetic_filter_hexcode; // Kinetic output only: ICAO hex addresses to filter out, e.g. "3C8E01-3C8E05,3C3EB9"
     char *net_output_beast_reduce_ports; // List of Beast output TCP ports
     char *net_output_asterix_ports; // List of Asterix output TCP ports
     char *net_input_asterix_ports; // List of Asterix input TCP ports
@@ -1153,7 +1159,7 @@ struct modesMessage
     float calculated_track; // set in speed_check, -1 is invalid
 
     // meteorological
-    int wind_speed;
+    float wind_speed;
     float wind_direction;
     float oat;
     int static_pressure;
@@ -1332,6 +1338,10 @@ enum {
     OptNetJaeroInPorts,
     OptNetBiPorts,
     OptNetBoPorts,
+    OptNetKineticPorts,
+    OptNetKineticForwardMlat,
+    OptNetKineticFilterCategory,
+    OptNetKineticFilterHexcode,
     OptNetAsterixInPorts,
     OptNetAsterixOutPorts,
     OptNetAsterixReduce,

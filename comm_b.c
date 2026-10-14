@@ -52,10 +52,12 @@ static CommBDecoderFn comm_b_decoders[] = {
 void decodeCommB(struct modesMessage *mm) {
     mm->commb_format = COMMB_UNKNOWN;
 
-    // If DR or UM are set, this message is _probably_ noise
+    // If DR is set, this message is _probably_ noise
     // as nothing really seems to use the multisite broadcast stuff?
-    // Also skip anything that had errors corrected
-    if (mm->DR != 0 || mm->UM != 0 || mm->correctedbits > 0) {
+    // Also skip anything that had errors corrected.
+    // UM is not checked: decodeModesMessage decodes UM after calling
+    // decodeCommB, so mm->UM is always 0 here and the check never acted.
+    if (mm->DR != 0 || mm->correctedbits > 0) {
         return;
     }
 
@@ -623,7 +625,7 @@ static int decodeBDS50(struct modesMessage *mm, bool store) {
 
     // small penalty for inconsistent data
     if (gs_valid && tas_valid) {
-        int delta = abs((int)gs_valid - (int)tas_valid);
+        int delta = abs((int)gs - (int)tas);
         if (delta > 150) {
             score -= 6;
         }
@@ -779,7 +781,24 @@ static int decodeBDS60(struct modesMessage *mm, bool store) {
 
     // small penalty for inconsistent data
 
-    // Should check IAS vs Mach at given altitude, but the maths is a little involved
+    // IAS vs Mach consistency at the pressure altitude carried by DF20 (ISA, CAS ~ IAS).
+    // A BDS 5,0 misclassified as 6,0 (or bit errors) fails this even when every
+    // field is individually within range.
+    if (ias_valid && mach_valid && mm->baro_alt_valid && mm->baro_alt_unit == UNIT_FEET
+            && mm->baro_alt > -1500 && mm->baro_alt < 60000) {
+        double h_m = mm->baro_alt * 0.3048;
+        double p_ratio;
+        if (h_m <= 11000.0) {
+            p_ratio = pow(1.0 - 2.25577e-5 * h_m, 5.25588);
+        } else {
+            p_ratio = 0.22336 * exp(-(h_m - 11000.0) / 6341.62);
+        }
+        double qc_p0 = p_ratio * (pow(1.0 + 0.2 * mach * mach, 3.5) - 1.0);
+        double cas = 661.47 * sqrt(5.0 * (pow(qc_p0 + 1.0, 2.0 / 7.0) - 1.0));
+        if (fabs(cas - (double) ias) > 25.0) {
+            score -= 12;
+        }
+    }
 
     if (baro_rate_valid && inertial_rate_valid) {
         int delta = abs(baro_rate - inertial_rate);
@@ -873,7 +892,7 @@ static int decodeBDS44(struct modesMessage *mm, bool store) {
         else {
             return 0;
         }
-        wind_direction = wind_direction_raw * (180 / 256);
+        wind_direction = wind_direction_raw * (180.0f / 256);
         if (wind_direction >= 0 && wind_direction <= 360){
             score += 9;
         }
@@ -881,8 +900,11 @@ static int decodeBDS44(struct modesMessage *mm, bool store) {
             return 0;
         }
     }
-    else if (wind_speed == 0) {
+    else if (wind_speed_raw == 0 && wind_direction_raw == 0) {
         score += 2;
+    }
+    else {
+        return 0;
     }
     if (temperature_sign){
         temperature = (static_air_temperature_raw - pow(2, 10)) * 0.25;
@@ -905,8 +927,11 @@ static int decodeBDS44(struct modesMessage *mm, bool store) {
             return 0;
         }
     }
-    else if (static_pressure == 0) {
+    else if (static_pressure_raw == 0) {
         score += 1;
+    }
+    else {
+        return 0;
     }
     if (turbulence_valid){
         turbulence = (int)turbulence_raw;
@@ -917,8 +942,11 @@ static int decodeBDS44(struct modesMessage *mm, bool store) {
             return 0;
         }
     }
-    else if (turbulence == 0) {
+    else if (turbulence_raw == 0) {
         score += 1;
+    }
+    else {
+        return 0;
     }
     if (humidity_valid) {
         humidity = humidity_raw * (100.0f / 64);
@@ -929,14 +957,17 @@ static int decodeBDS44(struct modesMessage *mm, bool store) {
             return 0;
         }
     }
-    else if (humidity == 0) {
+    else if (humidity_raw == 0) {
         score += 1;
+    }
+    else {
+        return 0;
     }
     if (store) {
         mm->commb_format = COMMB_METEOROLOGICAL_ROUTINE;
         mm->met_source_valid = 1;
         mm->met_source = met_source;
-        if (wind_valid) { 
+        if (wind_valid && !(wind_speed == 0 && wind_direction == 0)) {
             mm->wind_valid = 1;
             mm->wind_speed = wind_speed;
             mm->wind_direction = wind_direction;

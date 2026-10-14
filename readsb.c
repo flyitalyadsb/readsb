@@ -164,6 +164,7 @@ static void configSetDefaults(void) {
     Modes.net_input_beast_ports = strdup("0");
     Modes.net_input_planefinder_ports = strdup("0");
     Modes.net_output_beast_ports = strdup("0");
+    Modes.net_output_kinetic_ports = strdup("0");
     Modes.net_output_beast_reduce_ports = strdup("0");
     Modes.net_output_beast_reduce_interval = 250;
     Modes.beast_reduce_filter_altitude = -1;
@@ -1440,6 +1441,9 @@ static void cleanup_and_exit(int code) {
     sfree(Modes.net_input_beast_ports);
     sfree(Modes.net_input_planefinder_ports);
     sfree(Modes.net_output_beast_ports);
+    sfree(Modes.net_output_kinetic_ports);
+    sfree(Modes.net_kinetic_filter_category);
+    sfree(Modes.net_kinetic_filter_hexcode);
     sfree(Modes.net_output_beast_reduce_ports);
     sfree(Modes.net_output_vrs_ports);
     sfree(Modes.net_input_raw_ports);
@@ -1982,6 +1986,21 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             sfree(Modes.net_output_beast_ports);
             Modes.net_output_beast_ports = strdup(arg);
             break;
+        case OptNetKineticPorts:
+            sfree(Modes.net_output_kinetic_ports);
+            Modes.net_output_kinetic_ports = strdup(arg);
+            break;
+        case OptNetKineticForwardMlat:
+            Modes.forward_mlat_kinetic = 1;
+            break;
+        case OptNetKineticFilterCategory:
+            sfree(Modes.net_kinetic_filter_category);
+            Modes.net_kinetic_filter_category = strdup(arg);
+            break;
+        case OptNetKineticFilterHexcode:
+            sfree(Modes.net_kinetic_filter_hexcode);
+            Modes.net_kinetic_filter_hexcode = strdup(arg);
+            break;
         case OptNetBiPorts:
             sfree(Modes.net_input_beast_ports);
             Modes.net_input_beast_ports = strdup(arg);
@@ -2200,6 +2219,10 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                 }
                 if (strcasecmp(token[0], "sbs_extra_fields") == 0) {
                     Modes.sbs_extra_fields = 1;
+                }
+                if (strcasecmp(token[0], "json_age_fields") == 0) {
+                    // --devel=json_age_fields: add various data ages (might add more)
+                    Modes.json_age_fields = 1;
                 }
                 if (strcasecmp(token[0], "beast_dated_dirs") == 0) {
                     Modes.beast_dated_dirs = 1;

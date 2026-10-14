@@ -901,6 +901,10 @@ static void initMessageBuffers() {
     }
 }
 
+// Forward declaration: defined further down alongside the rest of the
+// Kinetic protocol support code, but needed here already by modesInitNet().
+static void kineticFilterInit(void);
+
 void modesInitNet(void) {
     initMessageBuffers();
 
@@ -947,6 +951,7 @@ void modesInitNet(void) {
     struct net_service *sbs_in_prio;
     struct net_service *gpsd_in;
     struct net_service *planefinder_in;
+    struct net_service *kinetic_out;
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -961,6 +966,13 @@ void modesInitNet(void) {
 
     beast_out = serviceInit(&Modes.services_out, "Beast TCP output", &Modes.beast_out, beast_heartbeat, no_heartbeat, READ_MODE_BEAST_COMMAND, NULL, handleBeastCommand);
     serviceListen(beast_out, Modes.net_bind_address, Modes.net_output_beast_ports, Modes.net_epfd);
+
+    // No heartbeat: the Kinetic/BaseStation protocol has no ping mechanism
+    // we know of, and no read_handler: readKineticCommand (READ_MODE_KINETIC_COMMAND)
+    // handles the login handshake directly and doesn't need to dispatch further.
+    kinetic_out = serviceInit(&Modes.services_out, "Kinetic TCP output", &Modes.kinetic_out, no_heartbeat, no_heartbeat, READ_MODE_KINETIC_COMMAND, NULL, NULL);
+    serviceListen(kinetic_out, Modes.net_bind_address, Modes.net_output_kinetic_ports, Modes.net_epfd);
+    kineticFilterInit();
 
     beast_reduce_out = serviceInit(&Modes.services_out, "BeastReduce TCP output", &Modes.beast_reduce_out, beast_heartbeat, no_heartbeat, READ_MODE_BEAST_COMMAND, NULL, handleBeastCommand);
     serviceListen(beast_reduce_out, Modes.net_bind_address, Modes.net_output_beast_reduce_ports, Modes.net_epfd);
@@ -1193,6 +1205,13 @@ static void modesAcceptClients(struct client *c, int64_t now) {
             setProxyString(c);
             if (Modes.debug_net && (!Modes.netIngest || c->service->group == &Modes.services_out)) {
                 fprintf(stderr, "%s: new c from %s port %s (fd %d)\n",
+                        c->service->descr, c->host, c->port, fd);
+            }
+            if (c->service->read_mode == READ_MODE_KINETIC_COMMAND) {
+                // Kinetic (BaseStation) clients get a console message unconditionally,
+                // independent of --debug net, so feeder operators can see when a
+                // BaseStation-compatible client (dis)connects without extra debug noise.
+                fprintf(stderr, "%s: Kinetic client connected: %s port %s (fd %d)\n",
                         c->service->descr, c->host, c->port, fd);
             }
         } else {
@@ -1733,6 +1752,12 @@ static char *netTimestamp(char *p, int64_t timestamp) {
 //
 // Write raw output in Beast Binary format with Timestamp to TCP clients
 //
+// Forward declarations: defined further down alongside the rest of the
+// Kinetic protocol support code, but needed here already by
+// modesSendKineticOutput.
+static uint16_t kineticChecksum(const unsigned char *body, int len);
+static void kineticNextTsPrefix(unsigned char out[4]);
+
 static void modesSendBeastOutput(struct modesMessage *mm, struct net_writer *writer) {
     int msgLen = mm->msgbits / 8;
     // 0x1a 0xe3 receiverId(2*8) 0x1a msgType timestamp+signal(2*7) message(2*msgLen)
@@ -1790,6 +1815,259 @@ static void modesSendBeastOutput(struct modesMessage *mm, struct net_writer *wri
             *p++ = ch;
         }
     }
+
+    completeWrite(writer, p);
+}
+
+//
+//=========================================================================
+//
+// Kinetic-output-only filters. These deliberately live entirely within the
+// Kinetic code path (checked inside modesSendKineticOutput() below) and
+// have no effect whatsoever on beast_out/beast_reduce_out/raw_out/sbs_out --
+// filtering happens per-output-format, not globally on the message.
+//
+#define KINETIC_FILTER_MAX_RANGES 64
+
+struct kineticFilterRange {
+    int start;
+    int end;
+};
+
+static struct kineticFilterRange kineticCategoryFilter[KINETIC_FILTER_MAX_RANGES];
+static int kineticCategoryFilterCount = 0;
+
+static struct kineticFilterRange kineticHexcodeFilter[KINETIC_FILTER_MAX_RANGES];
+static int kineticHexcodeFilterCount = 0;
+
+// ADS-B emitter categories are encoded here as letterIndex*8 + digit, where
+// letterIndex is A=0, B=1, C=2, D=3 -- this turns "C0-C7" into a plain
+// integer range [16,23], matching the same scheme used to derive the
+// category from a live message (see kineticMessageCategory() below).
+static int kineticCategoryLetterIndex(char c) {
+    switch (toupper((unsigned char) c)) {
+        case 'A': return 0;
+        case 'B': return 1;
+        case 'C': return 2;
+        case 'D': return 3;
+        default: return -1;
+    }
+}
+
+// Parses a single category token, e.g. "C0", into its encoded integer.
+// Returns 0 on success, -1 on invalid format.
+static int kineticParseCategoryValue(const char *s, int *out) {
+    if (strlen(s) != 2) {
+        return -1;
+    }
+    int letterIndex = kineticCategoryLetterIndex(s[0]);
+    if (letterIndex < 0 || s[1] < '0' || s[1] > '7') {
+        return -1;
+    }
+    *out = letterIndex * 8 + (s[1] - '0');
+    return 0;
+}
+
+// Parses a comma-separated --net-kinetic-filter-category spec such as
+// "C0-C7,A1" into kineticCategoryFilter[]. Exits with an error message on
+// malformed input, same as readsb does for other malformed CLI arguments.
+static void kineticParseCategoryFilter(const char *spec) {
+    if (!spec || !*spec) {
+        return;
+    }
+    char *copy = strdup(spec);
+    char *saveptr = NULL;
+    char *token = strtok_r(copy, ",", &saveptr);
+    while (token) {
+        if (kineticCategoryFilterCount >= KINETIC_FILTER_MAX_RANGES) {
+            fprintf(stderr, "--net-kinetic-filter-category: too many entries (max %d)\n", KINETIC_FILTER_MAX_RANGES);
+            exit(1);
+        }
+        char *dash = strchr(token, '-');
+        int start, end;
+        if (dash) {
+            *dash = 0;
+            if (kineticParseCategoryValue(token, &start) != 0 || kineticParseCategoryValue(dash + 1, &end) != 0) {
+                fprintf(stderr, "--net-kinetic-filter-category: invalid range '%s-%s' (expected e.g. C0-C7)\n", token, dash + 1);
+                exit(1);
+            }
+        } else {
+            if (kineticParseCategoryValue(token, &start) != 0) {
+                fprintf(stderr, "--net-kinetic-filter-category: invalid value '%s' (expected e.g. C0)\n", token);
+                exit(1);
+            }
+            end = start;
+        }
+        if (start > end) {
+            int tmp = start; start = end; end = tmp;
+        }
+        kineticCategoryFilter[kineticCategoryFilterCount].start = start;
+        kineticCategoryFilter[kineticCategoryFilterCount].end = end;
+        kineticCategoryFilterCount++;
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    free(copy);
+}
+
+// Parses a comma-separated --net-kinetic-filter-hexcode spec such as
+// "3C8E01-3C8E05,3C3EB9" into kineticHexcodeFilter[].
+static void kineticParseHexcodeFilter(const char *spec) {
+    if (!spec || !*spec) {
+        return;
+    }
+    char *copy = strdup(spec);
+    char *saveptr = NULL;
+    char *token = strtok_r(copy, ",", &saveptr);
+    while (token) {
+        if (kineticHexcodeFilterCount >= KINETIC_FILTER_MAX_RANGES) {
+            fprintf(stderr, "--net-kinetic-filter-hexcode: too many entries (max %d)\n", KINETIC_FILTER_MAX_RANGES);
+            exit(1);
+        }
+        char *dash = strchr(token, '-');
+        char *endptr;
+        long start, end;
+        if (dash) {
+            *dash = 0;
+            start = strtol(token, &endptr, 16);
+            if (*endptr != 0 || endptr == token) {
+                fprintf(stderr, "--net-kinetic-filter-hexcode: invalid hex value '%s'\n", token);
+                exit(1);
+            }
+            end = strtol(dash + 1, &endptr, 16);
+            if (*endptr != 0 || endptr == dash + 1) {
+                fprintf(stderr, "--net-kinetic-filter-hexcode: invalid hex value '%s'\n", dash + 1);
+                exit(1);
+            }
+        } else {
+            start = strtol(token, &endptr, 16);
+            if (*endptr != 0 || endptr == token) {
+                fprintf(stderr, "--net-kinetic-filter-hexcode: invalid hex value '%s'\n", token);
+                exit(1);
+            }
+            end = start;
+        }
+        if (start > end) {
+            long tmp = start; start = end; end = tmp;
+        }
+        kineticHexcodeFilter[kineticHexcodeFilterCount].start = (int) start;
+        kineticHexcodeFilter[kineticHexcodeFilterCount].end = (int) end;
+        kineticHexcodeFilterCount++;
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+    free(copy);
+}
+
+// Called once from modesInitNet() after CLI args are parsed.
+static void kineticFilterInit(void) {
+    kineticParseCategoryFilter(Modes.net_kinetic_filter_category);
+    kineticParseHexcodeFilter(Modes.net_kinetic_filter_hexcode);
+}
+
+static int kineticCategoryFiltered(int category) {
+    for (int i = 0; i < kineticCategoryFilterCount; i++) {
+        if (category >= kineticCategoryFilter[i].start && category <= kineticCategoryFilter[i].end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int kineticHexcodeFiltered(int icao) {
+    for (int i = 0; i < kineticHexcodeFilterCount; i++) {
+        if (icao >= kineticHexcodeFilter[i].start && icao <= kineticHexcodeFilter[i].end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Extracts the ADS-B emitter category from a "Aircraft Identification and
+// Category" message (ME Type Code 1-4, first ME byte = msg[4]). Returns -1
+// if this message doesn't carry a category (any other TC).
+static int kineticMessageCategory(const unsigned char *msg) {
+    unsigned char meFirstByte = msg[4];
+    int tc = meFirstByte >> 3;
+    int letterIndex;
+    switch (tc) {
+        case 4: letterIndex = 0; break; // A
+        case 3: letterIndex = 1; break; // B
+        case 2: letterIndex = 2; break; // C
+        case 1: letterIndex = 3; break; // D
+        default: return -1;
+    }
+    return letterIndex * 8 + (meFirstByte & 0x07);
+}
+
+// Write Mode-S long (14 byte) / short (7 byte) messages in Kinetic
+// (SBS-3/BaseStation binary) format to TCP clients. Only DF17/18/19 (ADS-B),
+// other 112-bit DF, and 56-bit DF are forwarded -- Mode A/C is out of scope,
+// same as the standalone JS bridge this is based on.
+static void modesSendKineticOutput(struct modesMessage *mm, struct net_writer *writer) {
+    int msgLen = mm->msgbits / 8;
+    unsigned char type;
+
+    if (msgLen == MODES_LONG_MSG_BYTES) {
+        type = (mm->msgtype == 17 || mm->msgtype == 18 || mm->msgtype == 19) ? 0x01 : 0x05;
+    } else if (msgLen == MODES_SHORT_MSG_BYTES) {
+        type = 0x07;
+    } else {
+        return; // Mode A/C or anything else: out of scope
+    }
+
+    unsigned char *msg = (Modes.net_verbatim ? mm->verbatim : mm->msg);
+
+    // ICAO hexcode filter (Kinetic output only). Applies only to DF types
+    // with an unencrypted 24-bit address field in byte 2-4 (DF11/17/18/19);
+    // for DF4/5/20/21 the address is folded into the parity and not safely
+    // readable here, so those are never touched by this filter.
+    if (kineticHexcodeFilterCount > 0 &&
+            (mm->msgtype == 11 || mm->msgtype == 17 || mm->msgtype == 18 || mm->msgtype == 19)) {
+        int icao = (msg[1] << 16) | (msg[2] << 8) | msg[3];
+        if (kineticHexcodeFiltered(icao)) {
+            return;
+        }
+    }
+
+    // ADS-B emitter category filter (Kinetic output only). Only DF17/18/19
+    // "Aircraft Identification and Category" messages (type byte 0x01,
+    // ME TC 1-4) carry a category; everything else is unaffected.
+    if (kineticCategoryFilterCount > 0 && type == 0x01) {
+        int category = kineticMessageCategory(msg);
+        if (category >= 0 && kineticCategoryFiltered(category)) {
+            return;
+        }
+    }
+
+    unsigned char tsPrefix[4];
+    kineticNextTsPrefix(tsPrefix);
+
+    // Worst case size: DLE STX + fully-stuffed body (type + 4 byte prefix +
+    // up to 14 byte message, every byte potentially doubled) + DLE ETX + 2
+    // byte checksum (checksum bytes themselves are not stuffed).
+    int bodyLen = 1 + 4 + msgLen;
+    char *p = prepareWrite(writer, 2 + 2 * bodyLen + 2 + 2);
+    if (!p)
+        return;
+
+    unsigned char body[1 + 4 + MODES_LONG_MSG_BYTES];
+    body[0] = type;
+    memcpy(body + 1, tsPrefix, 4);
+    memcpy(body + 5, msg, msgLen);
+    uint16_t crc = kineticChecksum(body, bodyLen);
+
+    *p++ = 0x10;
+    *p++ = 0x02;
+    for (int i = 0; i < bodyLen; i++) {
+        unsigned char b = body[i];
+        *p++ = (char) b;
+        if (b == 0x10) {
+            *p++ = (char) b;
+        }
+    }
+    *p++ = 0x10;
+    *p++ = 0x03;
+    *p++ = (char) ((crc >> 8) & 0xFF);
+    *p++ = (char) (crc & 0xFF);
 
     completeWrite(writer, p);
 }
@@ -3794,6 +4072,128 @@ void sendBeastSettings(int fd, const char *settings) {
     anetWrite(fd, buf, len);
 }
 
+//
+//=========================================================================
+//
+// Kinetic (SBS-3/BaseStation binary) protocol support.
+//
+// Reverse-engineered against a real tcpdump capture (BaseStation <-> real
+// SBS-3) -- see the standalone beast-to-kinetic-bridge.js prototype this
+// port is based on for the original derivation notes. Summary:
+//
+// - Framing is DLE/STX ... DLE/ETX + 2 byte checksum, with DLE (0x10) byte
+//   stuffing (doubled) inside the body, same idea as Beast's 0x1a stuffing.
+// - Checksum is CRC-16/CCITT (poly 0x1021, init 0x0000, no reflect, no
+//   xorout -- i.e. "CRC-16/XMODEM"), computed over Type-byte + payload
+//   BEFORE stuffing.
+// - The login reply pair below is byte-identical to what a real SBS-3
+//   sends; we don't need to understand its contents, just replay it once
+//   the client (BaseStation) sends its login frame (type 0x17).
+// - Data packet type depends on the Mode-S DF field, not always 0x01:
+//     0x01 KAL_PKT_MODES_ADSB  -- DF 17/18/19 (112 bit)
+//     0x05 KAL_PKT_MODES_LONG  -- other 112 bit DF (20/21/16/...)
+//     0x07 KAL_PKT_MODES_SHORT -- 56 bit DF 0-15
+// - Prefix before the raw Mode-S bytes is 1 unused byte (0x00) + a 3 byte
+//   rolling timestamp (50ns resolution per the Kinetic API Reference 1.03,
+//   absolute value not safety relevant for BaseStation).
+//
+static const unsigned char kineticLoginReplyDeviceInfo[] = {
+    0x10, 0x02, 0x26, 0xe9, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x20, 0x20,
+    0x53, 0x42, 0x53, 0x2d, 0x33, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x77, 0x00, 0x03, 0x01, 0x00, 0x00, 0x01, 0x13,
+    0x00, 0x10, 0x03, 0x89, 0x42,
+};
+static const unsigned char kineticLoginReplyReady[] = {
+    0x10, 0x02, 0x2c, 0x80, 0x10, 0x03, 0xd2, 0x03,
+};
+
+// CRC-16/CCITT (poly 0x1021, init 0x0000), verified against a real
+// modesmixer2 capture: 100% match across all observed packet types
+// (0x01, 0x05, 0x07, 0x20) plus the hardcoded login replies (0x26, 0x2c).
+static uint16_t kineticChecksum(const unsigned char *body, int len) {
+    uint16_t crc = 0x0000;
+    for (int i = 0; i < len; i++) {
+        crc ^= (uint16_t) body[i] << 8;
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x8000) ? (uint16_t) ((crc << 1) ^ 0x1021) : (uint16_t) (crc << 1);
+        }
+    }
+    return crc;
+}
+
+// 3-byte rolling timestamp, wraps at 0xFFFFFF -- see comment above.
+static uint32_t kineticTsCounter24 = 0;
+static void kineticNextTsPrefix(unsigned char out[4]) {
+    kineticTsCounter24 = (kineticTsCounter24 + 1) & 0xFFFFFF;
+    out[0] = 0x00;
+    out[1] = (kineticTsCounter24 >> 16) & 0xFF;
+    out[2] = (kineticTsCounter24 >> 8) & 0xFF;
+    out[3] = kineticTsCounter24 & 0xFF;
+}
+
+// Scan a connecting Kinetic (BaseStation) client's inbound buffer for a
+// login frame (type 0x17) and reply with the two hardcoded login packets
+// once seen. We don't care about anything else the client sends us, so
+// this intentionally does not dispatch to a generic read_handler -- once
+// logged in there is nothing more to parse from this client.
+static int readKineticCommand(struct client *c, int64_t now, struct messageBuffer *mb) {
+    MODES_NOTUSED(now);
+    MODES_NOTUSED(mb);
+
+    if (c->kineticLoggedIn) {
+        // Nothing left to do once logged in -- discard anything further.
+        c->som = c->eod;
+        return 0;
+    }
+
+    char *p;
+    // Find the next DLE/STX (0x10 0x02) frame start, skipping garbage before it.
+    while (c->som < c->eod - 1 && ((p = memchr(c->som, 0x10, c->eod - 1 - c->som)) != NULL)) {
+        if ((unsigned char) p[1] != 0x02) {
+            c->som = p + 1;
+            continue;
+        }
+
+        char *q = p + 2;
+        int found = 0;
+        while (q < c->eod - 1) {
+            if ((unsigned char) q[0] == 0x10) {
+                if ((unsigned char) q[1] == 0x10) {
+                    q += 2;
+                    continue;
+                }
+                if ((unsigned char) q[1] == 0x03) {
+                    found = 1;
+                    break;
+                }
+            }
+            q++;
+        }
+        if (!found || c->eod - q < 4) {
+            // Frame (or its trailing checksum) not fully received yet, wait for more data.
+            c->som = p;
+            return 0;
+        }
+
+        unsigned char type = (unsigned char) p[2];
+        if (type == 0x17) {
+            anetWrite(c->fd, (char *) kineticLoginReplyDeviceInfo, sizeof(kineticLoginReplyDeviceInfo));
+            anetWrite(c->fd, (char *) kineticLoginReplyReady, sizeof(kineticLoginReplyReady));
+            c->kineticLoggedIn = 1;
+            fprintf(stderr, "%s: Kinetic client logged in: %s port %s (fd %d)\n",
+                    c->service->descr, c->host, c->port, c->fd);
+            c->som = q + 4;
+            return 0;
+        }
+        // Some other frame type we don't care about -- skip it and keep scanning.
+        c->som = q + 4;
+    }
+    if (c->som < c->eod - 1) {
+        c->som = c->eod - 1;
+    }
+    return 0;
+}
+
 static int handle_gpsd(struct client *c, char *p, int remote, int64_t now, struct messageBuffer *mb) {
     MODES_NOTUSED(c);
     MODES_NOTUSED(remote);
@@ -4793,6 +5193,12 @@ static int readClient(struct client *c, int64_t now) {
             }
             fprintf(stderr, "%s: Remote server disconnected: %s port %s (fd %d, SendQ %d, RecvQ %d)\n",
                     c->service->descr, c->con->address, c->con->port, c->fd, c->sendq_len, c->buflen);
+        } else if (c->service->read_mode == READ_MODE_KINETIC_COMMAND) {
+            // Always report Kinetic client disconnects, regardless of --debug net,
+            // and note whether the login handshake ever completed.
+            fprintf(stderr, "%s: Kinetic client disconnected: %s port %s (fd %d, SendQ %d, RecvQ %d)%s\n",
+                    c->service->descr, c->host, c->port, c->fd, c->sendq_len, c->buflen,
+                    c->kineticLoggedIn ? "" : " (never logged in)");
         } else if (Modes.debug_net && !Modes.netIngest) {
             fprintf(stderr, "%s: Listen client disconnected: %s port %s (fd %d, SendQ %d, RecvQ %d)\n",
                     c->service->descr, c->host, c->port, c->fd, c->sendq_len, c->buflen);
@@ -5552,6 +5958,11 @@ static int processClient(struct client *c, int64_t now, struct messageBuffer *mb
 	    }
     } else if (read_mode == READ_MODE_PLANEFINDER) {
         int res = readPlanefinder(c, now, mb);
+        if (res != 0) {
+            return res;
+        }
+    } else if (read_mode == READ_MODE_KINETIC_COMMAND) {
+        int res = readKineticCommand(c, now, mb);
         if (res != 0) {
             return res;
         }
@@ -6320,6 +6731,12 @@ static void outputMessage(struct modesMessage *mm) {
             if (mm->reduce_forward && Modes.beast_reduce_out.connections) {
                 modesSendBeastOutput(mm, &Modes.beast_reduce_out);
             }
+        }
+        // Kinetic output has its own mlat-forwarding switch (--net-kinetic-forward-mlat),
+        // independent of --forward-mlat which only affects beast_out/beast_reduce_out.
+        if (!noforward && (!is_mlat || Modes.forward_mlat_kinetic) && (mm->correctedbits < 2 || Modes.net_verbatim)
+                && Modes.kinetic_out.connections) {
+            modesSendKineticOutput(mm, &Modes.kinetic_out);
         }
         if (Modes.dump_fw && (!Modes.dump_reduce || mm->reduce_forward)) {
             modesDumpBeastData(mm);
