@@ -42,12 +42,13 @@ jobs:
           type=sha,prefix=,format=long
           type=sha
           # flyitalyadsb: `canary` is what cell B runs (argocd-image-updater in
-          # nesso-infra follows it). It moves only for a build of a NEW commit on
-          # dev: a push, or the dispatch from sync-upstream after a merge. The
-          # weekly schedule rebuilds the same commit and must not redeploy it.
-          # promote.yaml later copies a canary that held up on cell B to `stable`,
-          # which cell A runs.
-          type=raw,value=canary,enable=${{ github.ref == 'refs/heads/dev' && github.event_name != 'schedule' && github.event_name != 'pull_request' }}
+          # nesso-infra follows it). It moves for every build of dev: a push, the
+          # dispatch from sync-upstream after a merge, and the weekly rebuild.
+          # The weekly one is not a no-op: the image downloads the aircraft
+          # database (tar1090-db, aircraft.csv.gz) at build time, so without it
+          # the database would age between upstream commits. promote.yaml later
+          # copies a canary that held up on cell B to `stable`, which cell A runs.
+          type=raw,value=canary,enable=${{ github.ref == 'refs/heads/dev' && github.event_name != 'pull_request' }}
           type=raw,value=latest,enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
           type=raw,value=${{ github.ref_name }}-${{ steps.useful_vars.outputs.short_sha }}-${{ steps.useful_vars.outputs.timestamp }},enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
     - name: Set up QEMU
