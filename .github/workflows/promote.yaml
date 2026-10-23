@@ -1,0 +1,54 @@
+name: promote canary to stable
+
+# flyitalyadsb: cell B runs `canary`, cell A runs `stable` (argocd-image-updater
+# in nesso-infra). Once a night this moves `stable` to the canary, if cell B has
+# run it long enough and stayed in line with cell A. The rules are in
+# .github/scripts/promote.py; the design in nesso-infra
+# docs/FLYITALYADSB-TWO-CELLS.md, "Automatic release of readsb and tar1090".
+on:
+  schedule:
+    # After readsb has written yesterday's history (00:15-00:55 UTC) and before
+    # the morning traffic. GitHub may run it late; any hour works.
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      bootstrap_digest:
+        description: "Once: point BOTH canary and stable at this digest (sha256:...), to adopt what already runs"
+        required: false
+        default: ""
+      dry_run:
+        description: "Decide and report, don't move any tag"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the gate
+        run: python3 .github/scripts/test_promote.py
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Decide and promote
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          COMMIT_FIELD: readsb_commit
+          STARTED_FIELD: readsb_started
+          SOAK_HOURS: "20"
+          MIN_RATIO: "0.85"
+          BOOTSTRAP_DIGEST: ${{ inputs.bootstrap_digest }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: python3 .github/scripts/promote.py
