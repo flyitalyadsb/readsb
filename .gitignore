@@ -11,3 +11,5 @@ viewadsb
 .version
 cprtests
 crctests
+# flyitalyadsb: compiled by .github/scripts/test_promote.py
+__pycache__/

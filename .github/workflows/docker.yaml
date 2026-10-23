@@ -8,6 +8,11 @@ on:
     branches:
       - "dev"
       - "sid"
+    # flyitalyadsb: a change to the workflows alone doesn't change the image (the
+    # Dockerfile never reads .github/), and every new dev image is a canary that
+    # restarts cell B's readsb. A push that also touches anything else still builds.
+    paths-ignore:
+      - ".github/**"
     tags:
       - "v*.*.*"
   pull_request:
