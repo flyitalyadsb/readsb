@@ -9,7 +9,9 @@ them. It runs in GitHub Actions, never in the cluster, and reads the public,
 read-only https://api.flyitalyadsb.com/api/cells.json (stats-api).
 
 Promote only if all of these hold:
-  - B runs the canary's commit (it has been deployed there);
+  - B runs the canary's commit, and B's readsb started after the canary image
+    was built (a weekly rebuild keeps the commit: only the start time tells
+    the new image from the old one);
   - B has run it without a restart for SOAK_HOURS;
   - B's data is fresh, and its aircraft and messages/s are at least MIN_RATIO
     of A's (A must answer: with A down there is nothing to compare with).
@@ -61,15 +63,24 @@ def digest(tag):
         return None
 
 
-def revision(ref):
-    """The commit an image was built from: the OCI label metadata-action sets."""
+def labels(ref):
+    """The OCI labels metadata-action sets: revision (the commit) and created."""
     image = inspect(ref, "{{json .Image}}")
     configs = image.values() if "config" not in image else [image]
     for c in configs:
-        rev = ((c.get("config") or {}).get("Labels") or {}).get("org.opencontainers.image.revision")
-        if rev:
-            return rev
-    return None
+        found = (c.get("config") or {}).get("Labels") or {}
+        if found.get("org.opencontainers.image.revision"):
+            return found
+    return {}
+
+
+def epoch(iso):
+    """'2026-10-19T10:38:36.539Z' -> seconds, or None."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
 
 
 def retag(tag, dgst):
@@ -80,7 +91,7 @@ def retag(tag, dgst):
                    check=True)
 
 
-def decide(canary_commit, cells, now):
+def decide(canary_commit, cells, now, canary_created=None):
     """('promote' | 'wait' | 'fail', reason). Pure: tested in test_promote.py."""
     a, b = (cells or {}).get("a"), (cells or {}).get("b")
     if b is None:
@@ -93,6 +104,10 @@ def decide(canary_commit, cells, now):
     started = b.get(STARTED_FIELD)
     if not isinstance(started, (int, float)):
         return "wait", "cell B doesn't say since when it runs"
+    if canary_created is None:
+        return "wait", "the canary image doesn't say when it was built"
+    if started < canary_created:
+        return "wait", "cell B started before the canary was built: it still runs an older image of that commit"
     soaked_h = (now - started) / 3600
     if soaked_h < SOAK_HOURS:
         return "wait", f"cell B has run the canary for {soaked_h:.1f} h of {SOAK_HOURS:g}"
@@ -131,11 +146,13 @@ def main():
         say(f"`stable` is already the canary ({canary[:19]}): nothing to do.")
         return 0
 
-    commit = revision(f"{IMAGE}@{canary}")
+    found = labels(f"{IMAGE}@{canary}")
+    commit = found.get("org.opencontainers.image.revision")
+    created = epoch(found.get("org.opencontainers.image.created"))
     req = urllib.request.Request(CELLS_URL, headers={"User-Agent": "flyitalyadsb-promote/1.0"})
     with urllib.request.urlopen(req, timeout=20) as r:
         cells = json.load(r).get("cells")
-    verdict, reason = decide(commit, cells, time.time())
+    verdict, reason = decide(commit, cells, time.time(), created)
     say(f"Canary {commit} ({canary[:19]}), stable {stable[:19]}: **{verdict}**, {reason}.")
     if verdict == "promote":
         retag("stable", canary)
