@@ -46,14 +46,6 @@ jobs:
           type=semver,pattern={{major}}
           type=sha,prefix=,format=long
           type=sha
-          # flyitalyadsb: `canary` is what cell B runs (argocd-image-updater in
-          # nesso-infra follows it). It moves for every build of dev: a push, the
-          # dispatch from sync-upstream after a merge, and the weekly rebuild.
-          # The weekly one is not a no-op: the image downloads the aircraft
-          # database (tar1090-db, aircraft.csv.gz) at build time, so without it
-          # the database would age between upstream commits. promote.yaml later
-          # copies a canary that held up on cell B to `stable`, which cell A runs.
-          type=raw,value=canary,enable=${{ github.ref == 'refs/heads/dev' && github.event_name != 'pull_request' }}
           type=raw,value=latest,enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
           type=raw,value=${{ github.ref_name }}-${{ steps.useful_vars.outputs.short_sha }}-${{ steps.useful_vars.outputs.timestamp }},enable=${{ endsWith(github.ref, github.event.repository.default_branch) }}
     - name: Set up QEMU
@@ -68,6 +60,7 @@ jobs:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
     - name: Build and push
+      id: build
       uses: docker/build-push-action@v7
       with:
         context: .
@@ -78,3 +71,18 @@ jobs:
         build-args: |
           BUILDKIT_CONTEXT_KEEP_GIT_DIR=true
         outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+    # flyitalyadsb: the canary for cell B, in its OWN repository. Every build of
+    # dev is one: a push, the dispatch from sync-upstream after a merge, and the
+    # weekly rebuild. The weekly rebuild is not a no-op, because the image
+    # downloads the aircraft database (tar1090-db aircraft.csv.gz) at build time.
+    # argocd-image-updater in nesso-infra follows readsb-canary:canary for cell B
+    # and readsb:stable for cell A; promote.yaml copies a canary that held up to
+    # stable. A separate repository, not a second tag: with two aliases on one
+    # repository argocd-image-updater v1.1.1 drops one cell's override when it
+    # writes the other's (it happened on 2026-10-23).
+    - name: Publish the canary for cell B
+      if: github.ref == 'refs/heads/dev' && github.event_name != 'pull_request'
+      run: >-
+        docker buildx imagetools create
+        --tag ghcr.io/${{ github.repository }}-canary:canary
+        ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
