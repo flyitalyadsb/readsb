@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: write
+  # A push made with GITHUB_TOKEN starts no workflow, so the merge below never
+  # triggered docker.yaml: a new upstream commit reached the image only at the
+  # weekly rebuild. The step after the merge starts the build explicitly.
+  actions: write
 
 jobs:
   sync:
@@ -17,6 +21,7 @@ jobs:
           ref: dev
           fetch-depth: 0
       - name: Merge wiedehopf/readsb dev into dev
+        id: merge
         run: |
           git remote add upstream https://github.com/wiedehopf/readsb.git
           git fetch upstream dev
@@ -37,10 +42,22 @@ jobs:
           # folds in upstream's commits on top; it only fails when upstream
           # touched the same lines our patches touch, which is the case that
           # actually needs a human.
+          before=$(git rev-parse HEAD)
           if git merge --no-edit upstream/dev; then
-            git push origin dev
+            # Our dev never equals upstream/dev (fork patches), so this merge
+            # runs every day and is usually "Already up to date". Only a merge
+            # that made a commit is news: only then push and build.
+            if [ "$(git rev-parse HEAD)" != "$before" ]; then
+              git push origin dev
+              echo "merged=1" >> "$GITHUB_OUTPUT"
+            fi
           else
             git merge --abort
             echo "::error::Merge conflict with upstream/dev — fork patches overlap upstream changes, needs a manual merge"
             exit 1
           fi
+      - name: Build the merged commit (it becomes the canary for cell B)
+        if: steps.merge.outputs.merged == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docker.yaml --ref dev
