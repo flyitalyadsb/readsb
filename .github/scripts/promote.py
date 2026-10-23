@@ -19,10 +19,13 @@ Promote only if all of these hold:
 on the new version" fails the job, so GitHub reports it, and stable stays
 where it is.
 
-Env: IMAGE, CELLS_URL, COMMIT_FIELD, STARTED_FIELD, SOAK_HOURS, MIN_RATIO,
-MAX_DATA_AGE_S, BOOTSTRAP_DIGEST (optional, once: point `stable` at this
-digest, i.e. what cell A already runs, and `canary` too if it doesn't exist
-yet), DRY_RUN=1 (decide, don't retag).
+Env: IMAGE (where builds and `stable` live), CANARY_IMAGE (where `canary`
+lives, default IMAGE-canary: a separate repository, see docker.yaml), CELLS_URL,
+COMMIT_FIELD, STARTED_FIELD, SOAK_HOURS, MIN_RATIO, MAX_DATA_AGE_S,
+BOOTSTRAP_DIGEST (optional, once: point `stable` at this digest, i.e. what
+cell A already runs), BOOTSTRAP_CANARY_DIGEST (optional, once: point `canary`
+at this digest, i.e. what cell B already runs), DRY_RUN=1 (decide, don't
+retag).
 Stdlib only, plus `docker buildx imagetools`.
 """
 import json
@@ -33,6 +36,7 @@ import time
 import urllib.request
 
 IMAGE = os.environ["IMAGE"]
+CANARY_IMAGE = os.environ.get("CANARY_IMAGE") or IMAGE + "-canary"
 CELLS_URL = os.environ.get("CELLS_URL", "https://api.flyitalyadsb.com/api/cells.json")
 COMMIT_FIELD = os.environ.get("COMMIT_FIELD", "readsb_commit")
 STARTED_FIELD = os.environ.get("STARTED_FIELD", "readsb_started")
@@ -56,9 +60,9 @@ def inspect(ref, fmt):
     return json.loads(out)
 
 
-def digest(tag):
+def digest(tag, image=IMAGE):
     try:
-        return inspect(f"{IMAGE}:{tag}", "{{json .Manifest}}")["digest"]
+        return inspect(f"{image}:{tag}", "{{json .Manifest}}")["digest"]
     except subprocess.CalledProcessError:
         return None
 
@@ -83,11 +87,12 @@ def epoch(iso):
         return None
 
 
-def retag(tag, dgst):
+def retag(tag, dgst, image=IMAGE):
+    """Point image:tag at a digest the build pushed to IMAGE."""
     if DRY_RUN:
-        say(f"DRY_RUN: would point `{tag}` at {dgst}")
+        say(f"DRY_RUN: would point `{image}:{tag}` at {dgst}")
         return
-    subprocess.run(["docker", "buildx", "imagetools", "create", "--tag", f"{IMAGE}:{tag}", f"{IMAGE}@{dgst}"],
+    subprocess.run(["docker", "buildx", "imagetools", "create", "--tag", f"{image}:{tag}", f"{IMAGE}@{dgst}"],
                    check=True)
 
 
@@ -128,14 +133,17 @@ def decide(canary_commit, cells, now, canary_created=None):
 
 def main():
     bootstrap = os.environ.get("BOOTSTRAP_DIGEST", "").strip()
-    if bootstrap:
-        retag("stable", bootstrap)
-        if digest("canary") is None:
-            retag("canary", bootstrap)
-        say(f"Bootstrap: `stable` now points at {bootstrap}.")
+    bootstrap_canary = os.environ.get("BOOTSTRAP_CANARY_DIGEST", "").strip()
+    if bootstrap or bootstrap_canary:
+        if bootstrap:
+            retag("stable", bootstrap)
+            say(f"Bootstrap: `{IMAGE}:stable` now points at {bootstrap}.")
+        if bootstrap_canary:
+            retag("canary", bootstrap_canary, CANARY_IMAGE)
+            say(f"Bootstrap: `{CANARY_IMAGE}:canary` now points at {bootstrap_canary}.")
         return 0
 
-    canary, stable = digest("canary"), digest("stable")
+    canary, stable = digest("canary", CANARY_IMAGE), digest("stable")
     if canary is None:
         say("No `canary` image yet: nothing to promote.")
         return 0

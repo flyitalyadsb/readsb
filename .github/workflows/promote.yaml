@@ -13,7 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       bootstrap_digest:
-        description: "Once: point stable at this digest (sha256:...), what cell A already runs (canary too if missing)"
+        description: "Once: point stable at this digest (sha256:...), what cell A already runs"
+        required: false
+        default: ""
+      bootstrap_canary_digest:
+        description: "Once: point canary (in IMAGE-canary) at this digest, what cell B already runs"
         required: false
         default: ""
       dry_run:
@@ -49,6 +53,8 @@ jobs:
           STARTED_FIELD: readsb_started
           SOAK_HOURS: "20"
           MIN_RATIO: "0.85"
+          CANARY_IMAGE: ghcr.io/${{ github.repository }}-canary
           BOOTSTRAP_DIGEST: ${{ inputs.bootstrap_digest }}
+          BOOTSTRAP_CANARY_DIGEST: ${{ inputs.bootstrap_canary_digest }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python3 .github/scripts/promote.py
