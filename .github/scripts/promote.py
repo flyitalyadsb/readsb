@@ -18,8 +18,9 @@ on the new version" fails the job, so GitHub reports it, and stable stays
 where it is.
 
 Env: IMAGE, CELLS_URL, COMMIT_FIELD, STARTED_FIELD, SOAK_HOURS, MIN_RATIO,
-MAX_DATA_AGE_S, BOOTSTRAP_DIGEST (optional: set canary AND stable to this
-digest, once, to adopt what already runs), DRY_RUN=1 (decide, don't retag).
+MAX_DATA_AGE_S, BOOTSTRAP_DIGEST (optional, once: point `stable` at this
+digest, i.e. what cell A already runs, and `canary` too if it doesn't exist
+yet), DRY_RUN=1 (decide, don't retag).
 Stdlib only, plus `docker buildx imagetools`.
 """
 import json
@@ -113,9 +114,10 @@ def decide(canary_commit, cells, now):
 def main():
     bootstrap = os.environ.get("BOOTSTRAP_DIGEST", "").strip()
     if bootstrap:
-        for tag in ("canary", "stable"):
-            retag(tag, bootstrap)
-        say(f"Bootstrap: `canary` and `stable` now point at {bootstrap}.")
+        retag("stable", bootstrap)
+        if digest("canary") is None:
+            retag("canary", bootstrap)
+        say(f"Bootstrap: `stable` now points at {bootstrap}.")
         return 0
 
     canary, stable = digest("canary"), digest("stable")
