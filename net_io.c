@@ -1166,13 +1166,7 @@ void modesInitNet(void) {
 //
 //=========================================================================
 // Accept new connections
-static void modesAcceptClients(struct client *c, int64_t now) {
-    if (!c || !c->acceptSocket)
-        return;
-
-    int listen_fd = c->fd;
-    struct net_service *s = c->service;
-
+static void modesAcceptClients(int listen_fd, struct net_service *s, int64_t now) {
     struct sockaddr_storage storage;
     struct sockaddr *saddr = (struct sockaddr *) &storage;
     socklen_t slen = sizeof(storage);
@@ -1183,15 +1177,16 @@ static void modesAcceptClients(struct client *c, int64_t now) {
 
         if (Modes.modesClientCount > Modes.max_fds_net) {
             // drop new modes clients if the count gets near resource limits
-            anetCloseSocket(c->fd);
+            anetCloseSocket(fd);
             static int64_t antiSpam;
             if (now > antiSpam) {
                 antiSpam = now + 30 * SECONDS;
                 fprintf(stderr, "<3> Can't accept new connection, limited to %d clients, consider increasing ulimit!\n", Modes.max_fds_net);
             }
+            continue;
         }
 
-        c = createSocketClient(s, fd, NULL);
+        struct client *c = createSocketClient(s, fd, NULL);
         if (s->unixSocket && c) {
             strcpy(c->host, s->unixSocket);
             fprintf(stderr, "%s: new c at %s\n", c->service->descr, s->unixSocket);
@@ -6163,7 +6158,7 @@ static void handleEpoll(struct net_service_group *group, struct messageBuffer *m
 
         if (cl->acceptSocket || cl->net_connector_dummyClient) {
             if (cl->acceptSocket) {
-                modesAcceptClients(cl, mstime());
+                modesAcceptClients(cl->fd, cl->service, mstime());
             }
             if (cl->net_connector_dummyClient) {
                 checkServiceConnected(cl->con, mstime());
