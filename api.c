@@ -1201,11 +1201,11 @@ static int parseDoubles(char *start, char *end, double *results, int max) {
         }
         *eot = '\0';
 
-        results[count++] = strtod(sot, &endptr);
-        if (eot != endptr) {
+        if (count >= max) {
             return -1;
         }
-        if (count > max) {
+        results[count++] = strtod(sot, &endptr);
+        if (eot != endptr) {
             return -1;
         }
     }
@@ -1227,7 +1227,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
     query++;
 
     // find end of query
-    char *eoq = memchr(query, ' ', request->len);
+    char *eoq = memchr(query, ' ', request->len - (query - req));
     if (!eoq) {
         return invalid;
     }
