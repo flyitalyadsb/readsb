@@ -526,6 +526,19 @@ void priorityTasksRun() {
         statsUpdate(now); // needs to happen under lock
     }
 
+
+    if (Modes.net) {
+        static int64_t next_free_clients;
+        int64_t free_client_interval = 1 * SECONDS;
+        if (now > next_free_clients) {
+            next_free_clients = now + free_client_interval;
+
+            // this can't happen at the same time as generateClientsJson and generateReceiversJson
+            // thus it has been moved to this section where all other threads are locked
+            netFreeClientsReceivers(free_client_interval);
+        }
+    }
+
     int64_t elapsed2 = lapWatch(&watch);
 
     Modes.currentTask = "unlocking";
@@ -2721,6 +2734,10 @@ static void configAfterParse() {
     if (Modes.net_sndbuf_size > (MODES_NET_SNDBUF_MAX)) {
         fprintf(stderr, "automatically clamping --net-buffer to 7 which is %d bytes\n", MODES_NET_SNDBUF_SIZE << MODES_NET_SNDBUF_MAX);
         Modes.net_sndbuf_size = MODES_NET_SNDBUF_MAX;
+    }
+    if (Modes.net_sndbuf_size < 0) {
+        fprintf(stderr, "automatically clamping --net-buffer to 0 which is %d bytes\n", MODES_NET_SNDBUF_SIZE);
+        Modes.net_sndbuf_size = 0;
     }
 
     Modes.netBufSize = MODES_NET_SNDBUF_SIZE << Modes.net_sndbuf_size;
