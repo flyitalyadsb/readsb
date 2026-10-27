@@ -60,4 +60,7 @@ jobs:
         if: steps.merge.outputs.merged == '1'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run docker.yaml --ref dev
+        # --repo: with a remote named "upstream" in this checkout, gh picks it
+        # (wiedehopf/readsb) as the repository and the call fails with 403.
+        # It failed on 25, 26 and 27/10: the merges were pushed, never built.
+        run: gh workflow run docker.yaml --ref dev --repo "$GITHUB_REPOSITORY"
