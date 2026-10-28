@@ -1001,7 +1001,7 @@ void modesInitNet(void) {
 
     int sbs_port_len = strlen(Modes.net_output_sbs_ports);
     int pos = sbs_port_len - 1;
-    if (sbs_port_len <= 5 && Modes.net_output_sbs_ports[pos] == '5') {
+    if (sbs_port_len > 0 && sbs_port_len <= 5 && Modes.net_output_sbs_ports[pos] == '5') {
 
         char *replay = strdup(Modes.net_output_sbs_ports);
         replay[pos] = '6';
@@ -1038,7 +1038,7 @@ void modesInitNet(void) {
 
     sbs_port_len = strlen(Modes.net_input_sbs_ports);
     pos = sbs_port_len - 1;
-    if (sbs_port_len <= 5 && Modes.net_input_sbs_ports[pos] == '6') {
+    if (sbs_port_len > 0 && sbs_port_len <= 5 && Modes.net_input_sbs_ports[pos] == '6') {
         char *mlat = strdup(Modes.net_input_sbs_ports);
         mlat[pos] = '7';
         serviceListen(sbs_in_mlat, Modes.net_bind_address, mlat, Modes.net_epfd);
@@ -3584,10 +3584,10 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
                 mm->mlatEPU = UINT16_MAX;
 
             //fprintf(stderr, "mlatEPU: %d\n", mm->mlatEPU);
-        } else if (!strcmp(t[21], "0")) {
+        } else if (!strcmp(t[20], "0")) {
             mm->squawk_emergency_valid = 1;
             mm->squawk_emergency = 0;
-        } else if (!strcmp(t[21], "-1")) {
+        } else if (!strcmp(t[20], "-1")) {
             mm->squawk_emergency_valid = 1;
             mm->squawk_emergency = 1;
         }
@@ -3595,7 +3595,7 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
 
     // Field 21 is the Squawk Ident flag
     if (t[21] && strlen(t[21]) > 0) {
-        if (!strcmp(t[21], "1")) {
+        if (!strcmp(t[21], "1") || !strcmp(t[21], "-1")) {
             mm->spi_valid = 1;
             mm->spi = 1;
         } else if (!strcmp(t[21], "0")) {
