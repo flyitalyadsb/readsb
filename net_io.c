@@ -156,6 +156,8 @@ static struct net_service *serviceInit(struct net_service_group *group, const ch
     }
 
     if (!group->services) {
+        fprintf(stderr, "FATAL: group->services alloc failed\n");
+        exit(1);
     }
 
     group->len++;
@@ -1160,6 +1162,8 @@ void modesInitNet(void) {
             dump_beast_check(mstime());
         }
     }
+
+    Modes.net_initialized = 1;
 }
 
 
@@ -6170,11 +6174,13 @@ static void serviceFreeClients(struct net_service *s) {
 
 // Unlink and free closed clients
 void netFreeClientsReceivers(int64_t interval) {
-    for (struct net_service *service = Modes.services_out.services; service->descr; service++) {
-        serviceFreeClients(service);
-    }
-    for (struct net_service *service = Modes.services_in.services; service->descr; service++) {
-        serviceFreeClients(service);
+    if (Modes.net_initialized) {
+        for (struct net_service *service = Modes.services_out.services; service->descr; service++) {
+            serviceFreeClients(service);
+        }
+        for (struct net_service *service = Modes.services_in.services; service->descr; service++) {
+            serviceFreeClients(service);
+        }
     }
 
     if (Modes.receiverTable) {
@@ -6381,7 +6387,7 @@ void modesNetPeriodicWork(void) {
     }
 
     /* Beast input from local Modes-S Beast via USB */
-    if (Modes.sdrInitialized && (Modes.sdr_type == SDR_MODESBEAST || Modes.sdr_type == SDR_GNS)) {
+    if (Modes.sdrInitialized && (Modes.sdr_type == SDR_MODESBEAST || Modes.sdr_type == SDR_GNS) && Modes.beast_fd >= 0) {
         if (!Modes.serial_client) {
             if (1 || Modes.debug_serial) {
                 fprintTimePrecise(stderr, mstime());
@@ -6401,6 +6407,10 @@ void modesNetPeriodicWork(void) {
         if (!Modes.serial_client->service) {
             fprintf(stderr, "Serial client closed unexpectedly, exiting!\n");
             setExit(2);
+            // netFreeClients() frees the closed client and its fd is closed:
+            // neither may be used again while the exit is pending
+            Modes.serial_client = NULL;
+            Modes.beast_fd = -1;
         }
     }
 
