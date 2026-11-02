@@ -1924,7 +1924,8 @@ struct char_buffer generateReceiverJson() {
     p = safe_snprintf(p, end, "{ "
             "\"refresh\": %.0f, "
             "\"history\": %d",
-            1.0 * Modes.json_interval, Modes.json_aircraft_history_next + 1);
+            // flyitalyadsb: with --tar1090-use-api the map polls the API, so advertise its rate
+            1.0 * (Modes.tar1090_use_api ? Modes.api_interval : Modes.json_interval), Modes.json_aircraft_history_next + 1);
 
 
     if (Modes.json_location_accuracy != 0 && Modes.userLocationValid) {

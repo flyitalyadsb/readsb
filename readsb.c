@@ -2076,6 +2076,11 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case OptTar1090UseApi:
             Modes.tar1090_use_api = 1;
             break;
+        case OptApiUpdateTime:
+            Modes.api_interval = (int64_t) (1000.0 * atof(arg));
+            if (Modes.api_interval < 100) // 0.1s, as --write-json-every
+                Modes.api_interval = 100;
+            break;
         case OptNetApiPorts:
             sfree(Modes.net_output_api_ports);
             Modes.net_output_api_ports = strdup(arg);
@@ -2576,6 +2581,15 @@ int parseCommandLine(int argc, char **argv) {
 }
 
 static void configAfterParse() {
+    // flyitalyadsb: --api-update-every defaults to --write-json-every and is never slower:
+    // the API update is what wakes the json writers (apiUpdate in api.c)
+    if (Modes.api_interval > Modes.json_interval) {
+        fprintf(stderr, "api-update-every can't be longer than write-json-every, using %.1f s\n", Modes.json_interval / 1000.0);
+    }
+    if (Modes.api_interval <= 0 || Modes.api_interval > Modes.json_interval) {
+        Modes.api_interval = Modes.json_interval;
+    }
+
     Modes.sdr_buf_samples = Modes.sdr_buf_size / 2;
     Modes.trackExpireMax = Modes.trackExpireJaero + TRACK_EXPIRE_LONG + 1 * MINUTES;
 
