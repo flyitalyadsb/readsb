@@ -845,7 +845,7 @@ static inline int apiAdd(struct apiBuffer *buffer, struct aircraft *a, int64_t n
 
 #if defined(WITH_UUIDS)
     // only include receivers if they have received the plane within the 2x the update interval
-    int64_t printNewer = now - 2 * Modes.json_interval;
+    int64_t printNewer = now - 2 * Modes.api_interval;
     for (int i = 0; i < RECENT_RECEIVER_IDS; i++) {
         entry->recentReceiverIds[i] = (a->recentReceiverIds[i].time > printNewer) ? a->recentReceiverIds[i].id : 0;
     }
@@ -1035,8 +1035,17 @@ static int apiUpdate() {
         atomic_store(&Modes.apiFlip[i], flip);
     }
 
-    pthread_cond_signal(&Threads.json.cond);
-    pthread_cond_signal(&Threads.globeJson.cond);
+    // flyitalyadsb: with --api-update-every below --write-json-every, wake the json
+    // writers once per json interval only, so the files keep their rate while the
+    // API (and the map through --tar1090-use-api) gets the faster one. Equal
+    // intervals: every update, as upstream. Only this thread (and the initial
+    // apiUpdate before it starts) gets here.
+    static int64_t lastJsonWake;
+    if (now - lastJsonWake >= Modes.json_interval - Modes.api_interval / 2) {
+        lastJsonWake = now;
+        pthread_cond_signal(&Threads.json.cond);
+        pthread_cond_signal(&Threads.globeJson.cond);
+    }
 
     return buffer->len;
 }
@@ -2065,7 +2074,7 @@ static void *apiUpdateEntryPoint(void *arg) {
 
         int64_t now = mstime();
 
-        int64_t ival = Modes.json_interval;
+        int64_t ival = Modes.api_interval;
         int64_t remaining = ival - (now % ival);
 
         if (remaining < 5) {

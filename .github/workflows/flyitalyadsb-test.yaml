@@ -1,0 +1,26 @@
+name: flyitalyadsb tests
+
+# flyitalyadsb: behaviour this fork adds on top of wiedehopf/readsb, tested on
+# a real binary (build.yaml is upstream's and only runs `make test`).
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libncurses-dev zlib1g-dev libzstd-dev
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: --api-update-every
+        run: flyitalyadsb/test-api-update-every.sh ./readsb
