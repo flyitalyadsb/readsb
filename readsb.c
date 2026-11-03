@@ -1767,7 +1767,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             int count = parseLongs(arg, dfs, dfs_size);
             for (int i = 0; i < count; i++)
             {
-                Modes.filterDFbitset |= (1 << dfs[i]);
+                // DF is a 5 bit field, anything else is not a valid filter value
+                if (dfs[i] >= 0 && dfs[i] < 32)
+                    Modes.filterDFbitset |= (1u << dfs[i]);
             }
             fprintf(stderr, "filter-DF: %s\n", arg);
 #undef dfs_size
@@ -3286,12 +3288,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (Modes.json_globe_index && !Modes.omitGlobeFiles) {
-        threadCreate(&Threads.globeBin, NULL, globeBinEntryPoint, NULL);
-    }
-
     if (Modes.json_dir) {
         threadCreate(&Threads.json, NULL, jsonEntryPoint, NULL);
+
+        if (Modes.json_globe_index && !Modes.omitGlobeFiles) {
+            threadCreate(&Threads.globeBin, NULL, globeBinEntryPoint, NULL);
+        }
 
         if (Modes.json_globe_index && !Modes.omitGlobeFiles && !Modes.tar1090_no_globe) {
             // globe_xxxx.json
@@ -3397,20 +3399,14 @@ int main(int argc, char **argv) {
 
     threadSignalJoin(&Threads.misc);
 
-    if (Modes.sdr_type != SDR_NONE) {
-        threadSignalJoin(&Threads.reader);
-    }
+    threadSignalJoin(&Threads.reader);
 
     threadSignalJoin(&Threads.upkeep);
 
-    if (Modes.json_dir) {
-        threadSignalJoin(&Threads.json);
+    threadSignalJoin(&Threads.json);
 
-        if (Modes.json_globe_index) {
-            threadSignalJoin(&Threads.globeJson);
-            threadSignalJoin(&Threads.globeBin);
-        }
-    }
+    threadSignalJoin(&Threads.globeJson);
+    threadSignalJoin(&Threads.globeBin);
 
     // after miscThread for the moment
     if (Modes.api) {

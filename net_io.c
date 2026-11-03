@@ -381,7 +381,7 @@ static struct client *createSocketClient(struct net_service *service, int fd, ch
         service->writer->connections++;
     }
     service->connections++;
-    Modes.modesClientCount++;
+    Modes.openSockets++;
 
     c->next = service->clients;
     service->clients = c;
@@ -785,7 +785,7 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
 
     p = bind_ports;
     while (p && *p) {
-        int newfds[16];
+        int newfds[64];
         int nfds, i;
 
         int is_unix = 0;
@@ -833,13 +833,20 @@ void serviceListen(struct net_service *service, char *bind_addr, char *bind_port
         } else {
             //nfds = anetTcpServer(Modes.aneterr, buf, bind_addr, newfds, sizeof (newfds), SOCK_NONBLOCK, getSNDBUF(service), getRCVBUF(service));
             // explicitely setting tcp buffers causes failure of linux tcp window auto tuning ... it just doesn't work well without the auto tuning
-            nfds = anetTcpServer(Modes.aneterr, buf, bind_addr, newfds, sizeof (newfds), SOCK_NONBLOCK, -1, -1);
+            Modes.aneterr[0] = '\0';
+            nfds = anetTcpServer(Modes.aneterr, buf, bind_addr, newfds, sizeof (newfds) / sizeof (newfds[0]),
+                    SOCK_NONBLOCK, -1, -1);
             if (nfds == ANET_ERR) {
                 fprintf(stderr, "Error opening the listening port %s (%s): %s\n",
                         buf, service->descr, Modes.aneterr);
                 exit(1);
+            } else if (Modes.aneterr[0] != '\0') {
+                fprintf(stderr, "Error listening on some of the addresses for %s (%s): %s\n",
+                        buf, service->descr, Modes.aneterr);
             }
         }
+
+        Modes.openSockets += nfds;
 
         char listenString[1024];
         snprintf(listenString, 1023, "%5s: %s port", buf, service->descr);
@@ -1076,7 +1083,10 @@ void modesInitNet(void) {
         unlink(commandSocketFile);
         snprintf(commandSocket, PATH_MAX, "unix:%s/cmd.sock", Modes.json_dir);
         serviceListen(commandService, Modes.net_bind_address, commandSocket, Modes.net_epfd);
-        chmod(commandSocket, 0600);
+        // commandSocket is "unix:<path>", the chmod has to use the file path
+        if (chmod(commandSocketFile, 0600)) {
+            fprintf(stderr, "command input: chmod %s: %s\n", commandSocketFile, strerror(errno));
+        }
     }
 
     raw_in = serviceInit(&Modes.services_in, "Raw TCP input", NULL, no_heartbeat, raw_heartbeat, READ_MODE_ASCII, "\n", processHexMessage);
@@ -1179,7 +1189,7 @@ static void modesAcceptClients(int listen_fd, struct net_service *s, int64_t now
     errno = 0;
     while ((fd = anetGenericAccept(Modes.aneterr, listen_fd, saddr, &slen, SOCK_NONBLOCK)) >= 0) {
 
-        if (Modes.modesClientCount > Modes.max_fds_net) {
+        if (Modes.openSockets > Modes.max_fds_net) {
             // drop new modes clients if the count gets near resource limits
             anetCloseSocket(fd);
             static int64_t antiSpam;
@@ -1259,7 +1269,7 @@ static void modesCloseClient(struct client *c) {
         anetCloseSocket(c->fd);
     }
     c->service->connections--;
-    Modes.modesClientCount--;
+    Modes.openSockets--;
     if (c->service->writer) {
         c->service->writer->connections--;
     }
@@ -2314,7 +2324,9 @@ static int decodeAsterixMessage(struct client *c, char *p, int remote, int64_t n
     switch(category){
         case 21: // ADS-B Message
             if(!(fspec[1] & 0x10)){ // no address. this is useless to us
-                return -1;
+                // discard the record, the stream is still valid: readAsterix()
+                // closes the client on any non-zero return
+                return 0;
             }
             if (fspec[0] & 0x80){ // ID021/010 Data Source Identification
                 ASTERIX_NEED(2);
@@ -2373,12 +2385,12 @@ static int decodeAsterixMessage(struct client *c, char *p, int remote, int64_t n
             }
             if (fspec[0] & 0x2){ // I021/131 Position in WGS-84 co-ordinates, high res.
                 ASTERIX_NEED(8);
-                int lat = (*p & 0xff) << 24;
+                int lat = (int) ((uint32_t) (*p & 0xff) << 24);
                 lat += (*(p + 1) & 0xff) << 16;
                 lat += (*(p + 2) & 0xff) << 8;
                 lat += (*(p + 3) & 0xff);
                 p += 4;
-                int lon = *p << 24;
+                int lon = (int) ((uint32_t) (uint8_t) *p << 24);
                 lon += (*(p + 1) & 0xff) << 16;
                 lon += (*(p + 2) & 0xff) << 8;
                 lon += (*(p + 3) & 0xff);
@@ -2769,6 +2781,25 @@ static int decodeAsterixMessage(struct client *c, char *p, int remote, int64_t n
             if (fspec[4] & 0x20) { // I021/220 Met Information
                 uint8_t met[FSPEC_MAX];
                 readFspec(met, &p, end);
+
+                // skip the fields present in the primary subfield, otherwise
+                // the following items are read from the met data
+                if (met[0] & 0x80) { // WS Wind Speed
+                    ASTERIX_NEED(2);
+                    p += 2;
+                }
+                if (met[0] & 0x40) { // WD Wind Direction
+                    ASTERIX_NEED(2);
+                    p += 2;
+                }
+                if (met[0] & 0x20) { // TMP Temperature
+                    ASTERIX_NEED(2);
+                    p += 2;
+                }
+                if (met[0] & 0x10) { // TRB Turbulence
+                    ASTERIX_NEED(1);
+                    p += 1;
+                }
             }
 
             if (fspec[4] & 0x10) { // I021/146 Selected Altitude
@@ -3494,7 +3525,7 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
     // field 12, altitude
     if (t[12] && strlen(t[12]) > 0) {
         double tmp = strtod(t[12], &endptr);
-        if (endptr != t[12] && isfinite(tmp)) {
+        if (endptr != t[12] && isfinite(tmp) && fabs(tmp) <= 100000) {
             mm->baro_alt = tmp;
             mm->baro_alt_valid = 1;
             mm->baro_alt_unit = UNIT_FEET;
@@ -3506,7 +3537,9 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
     // field 13, groundspeed
     if (t[13] && strlen(t[13]) > 0) {
         double tmp = strtod(t[13], &endptr);
-        if (endptr != t[13] && isfinite(tmp)) {
+        // 1e308 is a finite double but becomes inf when stored in the float
+        // below, which ends up as "gs":inf in aircraft.json
+        if (endptr != t[13] && isfinite(tmp) && tmp >= 0 && tmp <= 6000) {
             mm->gs_valid = 1;
             mm->gs.v0 = tmp;
         } else {
@@ -3517,7 +3550,8 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
     //field 14, heading
     if (t[14] && strlen(t[14]) > 0) {
         mm->heading = strtod(t[14], &endptr);
-        if (endptr != t[14] && isfinite(mm->heading)) {
+        if (endptr != t[14] && isfinite(mm->heading)
+                && mm->heading >= 0 && mm->heading <= 360) {
             mm->heading_valid = 1;
             mm->heading_type = HEADING_GROUND_TRACK;
         } else {
@@ -3545,7 +3579,7 @@ static int decodeSbsLine(struct client *c, char *line, int remote, int64_t now, 
     // field 17 vertical rate, assume baro
     if (t[17] && strlen(t[17]) > 0) {
         double tmp = strtod(t[17], &endptr);
-        if (endptr != t[17] && isfinite(tmp)) {
+        if (endptr != t[17] && isfinite(tmp) && fabs(tmp) <= 100000) {
             mm->baro_rate = tmp;
             mm->baro_rate_valid = 1;
         } else {
@@ -4343,6 +4377,10 @@ static int handleCommandSocket(struct client *c, char *p, int remote, int64_t no
     MODES_NOTUSED(mb);
     char *saveptr = NULL;
     char *cmd = strtok_r(p, " ", &saveptr);
+    if (!cmd) {
+        // empty line, nothing to do
+        return 0;
+    }
     if (strcmp(cmd, "deleteTrace") == 0) {
         char *t1 = strtok_r(NULL, " ", &saveptr);
         char *t2 = strtok_r(NULL, " ", &saveptr);
@@ -4480,12 +4518,14 @@ static int decodeBinMessage(struct client *c, char *p, int remote, int64_t now, 
      */
     mm->remote = remote;
 
-    mm->timestamp = 0;
     // Grab the timestamp (big endian format)
-    for (j = 0; j < 6; j++) {
-        ch = *p++;
-        mm->timestamp = mm->timestamp << 8 | (ch & 255);
-    }
+    mm->timestamp = ((uint64_t) (unsigned char) p[0] << 40)
+        | ((uint64_t) (unsigned char) p[1] << 32)
+        | ((uint64_t) (unsigned char) p[2] << 24)
+        | ((uint64_t) (unsigned char) p[3] << 16)
+        | ((uint64_t) (unsigned char) p[4] << 8)
+        | ((uint64_t) (unsigned char) p[5]);
+    p += 6;
 
     // record reception time as the time we read it.
     mm->sysTimestamp = now;
@@ -4507,9 +4547,8 @@ static int decodeBinMessage(struct client *c, char *p, int remote, int64_t now, 
             Modes.stats_current.strong_signal_count++; // signal power above -3dBFS
     }
 
-    for (j = 0; j < msgLen; j++) { // and the data
-        msg[j] = ch = *p++;
-    }
+    memcpy(msg, p, msgLen); // the data, the escapes are already removed
+    p += msgLen;
 
     int result = -10;
     if (msgLen == MODEAC_MSG_BYTES) { // ModeA or ModeC
@@ -5429,8 +5468,18 @@ static int readAsterix(struct client *c, int64_t now, struct messageBuffer *mb) 
         // where char is signed — a byte value > 127 would otherwise sign-extend
         // to a negative int before the shift, corrupting msgLen.
         uint16_t msgLen = ((uint8_t)*(p + 1) << 8) | (uint8_t)*(p + 2);
-        if (msgLen < 3 || c->som + msgLen > c->eod) {
-            // invalid or incomplete messages
+        if (msgLen < 3) {
+            // a length below 3 can never become valid, and ASTERIX has no
+            // resynchronisation marker, so the stream is lost
+            if (Modes.debug_net) {
+                fprintf(stderr, "%s: Closing connection from %s port %s, invalid ASTERIX length %u\n",
+                        c->service->descr, c->host, c->port, msgLen);
+            }
+            modesCloseClient(c);
+            return -1;
+        }
+        if (c->som + msgLen > c->eod) {
+            // incomplete message, wait for more data
             break;
         }
         char *end = c->som + msgLen;
@@ -5536,7 +5585,11 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
         fprintf(stderr, " orphaned bytes: %5d orphaned for: %8.3f\n", c->orphaned_bytes, (now - c->orphaned_bytes_ts) / 1000.0);
     }
 
-    while (c->som < c->eod && ((p = memchr(c->som, (char) 0x1a, c->eod - c->som)) != NULL)) { // The first byte of buffer 'should' be 0x1a
+    while (c->som < c->eod) {
+        // the next byte usually is the 0x1a we are looking for, skip the memchr call then
+        p = ((unsigned char) *c->som == 0x1a) ? c->som : memchr(c->som, (char) 0x1a, c->eod - c->som);
+        if (!p)
+            break;
 
         if (p > c->som) {
             garbageIncrement(c, p - c->som, __LINE__);
@@ -5605,6 +5658,10 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
             //fprintf(stderr, "%ld %ld\n", (long) now, (long) (c->eod - c->som));
 
             c->som = p; // set start of next message
+            if (p >= c->eod) {
+                // the synthetic timestamp was the last thing in the buffer
+                break;
+            }
             if (*p != 0x1A) {
                 //fprintf(stderr, "..\n");
                 c->som++;
@@ -6733,7 +6790,7 @@ static char *read_uuid(struct client *c, char *p, char *eod) {
 
 static void outputMessage(struct modesMessage *mm) {
     // filter messages with unwanted DF types (sbs_in are unknown DF type, filter them all, this is arbitrary but no one cares anyway)
-    if (Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1 << mm->msgtype)))) {
+    if (Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1u << mm->msgtype)))) {
         return;
     }
     if (!Modes.net) {

@@ -1066,7 +1066,8 @@ static void apiCloseCon(struct apiCon *con, struct apiThread *thread) {
     }
 
     int fd = con->fd;
-    if (con->events && epoll_ctl(thread->epfd, EPOLL_CTL_DEL, fd, NULL)) {
+    // the event is gone already on a normal client disconnect, ENOENT is expected
+    if (con->events && epoll_ctl(thread->epfd, EPOLL_CTL_DEL, fd, NULL) && errno != ENOENT) {
         fprintf(stderr, "apiCloseCon: EPOLL_CTL_DEL %d: %s\n", fd, strerror(errno));
     }
     con->events = 0;
@@ -1213,22 +1214,25 @@ static int parseDoubles(char *start, char *end, double *results, int max) {
         if (count >= max) {
             return -1;
         }
-        results[count++] = strtod(sot, &endptr);
-        if (eot != endptr) {
+        double value = strtod(sot, &endptr);
+        if (eot != endptr || !isfinite(value)) {
             return -1;
         }
+        results[count++] = value;
     }
     return count;
 }
 
 // expects lower cased input
-static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *request, struct apiOptions *options, struct apiThread *thread) {
+static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *request, char *req_line_end,
+        struct apiOptions *options, struct apiThread *thread) {
     struct char_buffer invalid = { 0 };
 
     char *req = request->buffer;
 
     // GET URL HTTPVERSION
-    char *query = memchr(req, '?', request->len);
+    // the query belongs to the request line, don't look for it in the headers
+    char *query = memchr(req, '?', req_line_end - req);
     if (!query) {
         return invalid;
     }
@@ -1236,7 +1240,7 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
     query++;
 
     // find end of query
-    char *eoq = memchr(query, ' ', request->len - (query - req));
+    char *eoq = memchr(query, ' ', req_line_end - query);
     if (!eoq) {
         return invalid;
     }
@@ -1274,7 +1278,9 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                     return invalid;
 
                 for (int i = 0; i < 4; i++) {
-                    if (box[i] > 180 || box[i] < -180)
+                    // latitude for the first two values, longitude for the rest
+                    double limit = (i < 2) ? 90 : 180;
+                    if (box[i] > limit || box[i] < -limit)
                         return invalid;
                 }
                 if (box[0] > box[1])
@@ -1303,6 +1309,9 @@ static struct char_buffer parseFetch(struct apiCon *con, struct char_buffer *req
                 if (circle->lat > 90 || circle->lat < -90)
                     return invalid;
                 if (circle->lon > 180 || circle->lon < -180)
+                    return invalid;
+                // negative or larger than half the earth circumference
+                if (circle->radius < 0 || circle->radius > 20037500)
                     return invalid;
 
             } else if (byteMatchStrict(option, "find_hex") || byteMatchStrict(option, "hexlist")) {
@@ -1768,7 +1777,7 @@ static void apiReadRequest(struct apiCon *con, struct apiThread *thread) {
     }
 
     con->content_type = "multipart/mixed";
-    struct char_buffer reply = parseFetch(con, request, options, thread);
+    struct char_buffer reply = parseFetch(con, request, protocol, options, thread);
     if (reply.len == 0) {
         //fprintf(stderr, "parseFetch returned invalid\n");
         send400(con->fd, con->keepalive);

@@ -579,11 +579,12 @@ static int speed_check(struct aircraft *a, datasource_t source, double lat, doub
             track_diff = fabs(norm_diff(track - calc_track, 180));
         }
     }
-
-    if (track_diff > 70.0f && speed > 10) {
-        mm->trackUnreliable = +1;
-    } else if (track_diff > -1) {
-        mm->trackUnreliable = -1;
+    if (track_diff > -1) {
+        if (track_diff > 70.0f && speed > 10) {
+            mm->trackUnreliable = +1;
+        } else {
+            mm->trackUnreliable = -1;
+        }
     }
 
     if (!posReliable(a)) {
@@ -2945,7 +2946,7 @@ exit:
             || (Modes.debug_7700 && ac && ac->squawk == 0x7700 && trackDataValid(&ac->squawk_valid))
        ) {
         // filter messages with unwanted DF types (sbs_in are unknown DF type, filter them all, this is arbitrary but no one cares anyway)
-        if (!(Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1 << mm->msgtype))))) {
+        if (!(Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1u << mm->msgtype))))) {
             displayModesMessage(mm);
         }
     }
