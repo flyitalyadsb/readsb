@@ -4201,12 +4201,9 @@ static void decodeHulcMessage(char *p) {
 
     if (id == 0x01 && len == 0x18) {
         // HULC Status message
+        // readBeast() has already removed the 0x1a escapes
         for (int j = 0; j < len; j++) {
             hsm.buf[j] = *p++;
-            // unescape
-            if (*p == 0x1A) {
-                p++;
-            }
         }
         /*
         // Antenna serial
@@ -6003,6 +6000,14 @@ static int readBeast(struct client *c, int64_t now, struct messageBuffer *mb) {
             }
             c->som += 2;
             continue;
+        } else if (ch == 'H' && p + 3 <= c->eod && p[1] != (char) 0x1A && p[2] != (char) 0x1A
+                && 3 + (unsigned char) p[2] <= MODES_LONG_MSG_BYTES + 8 + 16) {
+            // GNS HULC: 'H', message id, payload length, payload (0x1a escaped)
+            // the length has to fit the unescape buffer below
+            eom = p + 3 + (unsigned char) p[2];
+        } else if (ch == 'H' && p + 3 > c->eod) {
+            // incomplete HULC header, wait for the rest
+            break;
         } else {
             // Not a valid beast message, skip 0x1a
             // Skip following byte as well:
@@ -6950,7 +6955,7 @@ static char *read_uuid(struct client *c, char *p, char *eod) {
 
 static void outputMessage(struct modesMessage *mm) {
     // filter messages with unwanted DF types (sbs_in are unknown DF type, filter them all, this is arbitrary but no one cares anyway)
-    if (Modes.filterDF && (mm->sbs_in || !(Modes.filterDFbitset & (1u << mm->msgtype)))) {
+    if (filteredByDF(mm)) {
         return;
     }
     if (!Modes.net) {
